@@ -1,42 +1,42 @@
 """
-Main running script for testing and training of fixed bias model implemented with PyTorch
 
 Example Run
 
-python -m deep_noise_rejection.MNIST.main -at -tra Standard -tr -sm --epochs 10
+python -m deep_noise_rejection.CIFAR10.main --model ResNetMadry -tra RFGSM -at -Ni 7 -tr -sm
+
 """
-
-
-from __future__ import print_function
-
-import numpy as np
-from tqdm import tqdm
-import matplotlib as mpl
-from matplotlib import pyplot as plt
+import time
 import os
 from os import path
+from tqdm import tqdm
+import numpy as np
+
 import logging
-import time
 
 from apex import amp
 import torch
 import torch.optim as optim
+import torch.backends.cudnn as cudnn
 from torch.optim.lr_scheduler import MultiStepLR
 
 # ATTACK CODES
 from deepillusion.torchattacks import FGSM, RFGSM, PGD
 
-# MNIST TRAIN TEST CODES
-from deep_noise_rejection.MNIST.models.lenet_nr import CNN, CNN_standard
+# CIFAR10 TRAIN TEST CODES
+from deep_noise_rejection.CIFAR10.models.resnet import ResNet34
+from deep_noise_rejection.CIFAR10.models.resnet_new import ResNet, ResNetWide
+from deep_noise_rejection.CIFAR10.models.preact_resnet import PreActResNet18
 from deep_noise_rejection.train_test_functions import train, test
 
-from deep_noise_rejection.MNIST.parameters import get_arguments
-from deep_noise_rejection.MNIST.read_datasets import MNIST
+from deep_noise_rejection.CIFAR10.parameters import get_arguments
+from deep_noise_rejection.CIFAR10.read_datasets import cifar10
+
 
 logger = logging.getLogger(__name__)
 
 
 def main():
+    """ main function to run the experiments """
 
     args = get_arguments()
 
@@ -55,7 +55,6 @@ def main():
     logger.info(args)
     logger.info("\n")
 
-    # Get same results for each training with same parameters !!
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
@@ -63,33 +62,42 @@ def main():
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
 
-    train_loader, test_loader = MNIST(args)
+    train_loader, test_loader = cifar10(args)
+    x_min = 0.0
+    x_max = 1.0
 
-    if args.model == "standard":
-        model = CNN_standard().to(device)
-    elif args.model == "CNN":
-        model = CNN().to(device)
+    # Decide on which model to use
+    if args.model == "ResNet":
+        model = ResNet34().to(device)
+    elif args.model == "ResNetMadry":
+        model = ResNet().to(device)
+    elif args.model == "ResNetMadryWide":
+        model = ResNetWide().to(device)
+    elif args.model == "ResNet18":
+        model = PreActResNet18().to(device)
     else:
         raise NotImplementedError
 
-    # logging.info(model)
+    if device == "cuda":
+        model = torch.nn.DataParallel(model)
+        cudnn.benchmark = True
+
+    # logger.info(model)
+    # logger.info("\n")
 
     # Which optimizer to be used for training
-    # optimizer = optim.SGD(model.parameters(), lr=args.learning_rate, momentum=args.momentum)
-    # optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    # scheduler = MultiStepLR(optimizer, milestones=[100, 150], gamma=0.1)
     optimizer = optim.SGD(model.parameters(), lr=args.lr_max, momentum=args.momentum,
                           weight_decay=args.weight_decay)
-    lr_steps = args.epochs * len(train_loader)
-    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=args.lr_min,
-                                                  max_lr=args.lr_max, step_size_up=lr_steps/2,
-                                                  step_size_down=lr_steps/2)
 
     amp_args = dict(opt_level=args.opt_level, loss_scale=args.loss_scale, verbosity=False)
     if args.opt_level == 'O2':
         amp_args['master_weights'] = args.master_weights
     model, optimizer = amp.initialize(model, optimizer, **amp_args)
 
+    lr_steps = args.epochs * len(train_loader)
+    scheduler = torch.optim.lr_scheduler.CyclicLR(optimizer, base_lr=args.lr_min,
+                                                  max_lr=args.lr_max, step_size_up=lr_steps/2,
+                                                  step_size_down=lr_steps/2)
     attacks = dict(Standard=None,
                    PGD=PGD,
                    FGSM=FGSM,
@@ -120,8 +128,8 @@ def main():
             checkpoint_name += "_" + str(key) + "_" + str(attack_params[key])
     checkpoint_name += ".pt"
 
+    # Train network if args.train is set to True (You can set that true by calling '-tr' flag, default is False)
     if args.train:
-
         logger.info(args.tr_attack + " training")
         logger.info('Epoch \t Seconds \t LR \t \t Train Loss \t Train Acc')
 
@@ -160,7 +168,6 @@ def main():
         logger.info(f'Test  \t loss: {test_loss:.4f} \t acc: {test_acc:.4f}')
 
     if args.attack_network:
-
         attack_params = {
             "norm": args.norm,
             "eps": args.epsilon,
@@ -186,6 +193,11 @@ def main():
                          verbose=True)
         test_loss, test_acc = test(**test_args)
         logger.info(f'{args.attack} test \t loss: {test_loss:.4f} \t acc: {test_acc:.4f}\n')
+
+    # if args.black_box:
+    #     attack_loader = cifar10_black_box(args)
+
+    #     test(model, attack_loader)
 
 
 if __name__ == "__main__":
